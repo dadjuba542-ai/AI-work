@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import type { ToolDef } from "@/lib/llm";
 import { db } from "@/db";
@@ -9,6 +9,12 @@ import { eq } from "drizzle-orm";
 const ROOT = resolve(join(process.cwd(), "../../"));
 const TIMEOUT = 30000;
 const MAX_FILE_SIZE = 1024 * 1024;
+
+let minimaxConfig: { apiKey: string; baseUrl: string } | null = null;
+
+export function setMiniMaxConfig(apiKey: string, baseUrl: string) {
+  minimaxConfig = { apiKey, baseUrl };
+}
 
 function safePath(input: string): string {
   const resolved = resolve(join(ROOT, input));
@@ -98,6 +104,58 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
 
     const dirPath = resolve(join(process.cwd(), "data", "skills", skillId));
     return buildFileTree(dirPath);
+  },
+
+  async generate_image(args: { prompt: string; n?: number; aspect_ratio?: string }) {
+    if (!minimaxConfig) return "MiniMax API not configured";
+    const res = await fetch(`${minimaxConfig.baseUrl}/v1/image/generation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${minimaxConfig.apiKey}` },
+      body: JSON.stringify({ model: "image-01", prompt: args.prompt, n: args.n || 1, aspect_ratio: args.aspect_ratio || "1:1" }),
+      signal: AbortSignal.timeout(TIMEOUT),
+    });
+    const data = await res.json();
+    if (!res.ok) return `Image generation failed (${res.status}): ${JSON.stringify(data)}`;
+    const urls = (data.data || []).map((d: any) => d.url).join("\n");
+    return urls || JSON.stringify(data);
+  },
+
+  async text_to_speech(args: { text: string; voice_id?: string; speed?: number }) {
+    if (!minimaxConfig) return "MiniMax API not configured";
+    const res = await fetch(`${minimaxConfig.baseUrl}/v1/t2a/http`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${minimaxConfig.apiKey}` },
+      body: JSON.stringify({
+        model: "speech-2.6-hd",
+        text: args.text.slice(0, 10000),
+        voice_id: args.voice_id || "female-shaonv",
+        speed: args.speed || 1.0,
+        format: "mp3",
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) return `TTS failed (${res.status}): ${await res.text()}`;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const name = `tts-${Date.now()}.mp3`;
+    const outDir = resolve(join(process.cwd(), "data", "outputs"));
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, name), buf);
+    return `Audio saved: data/outputs/${name} (${buf.length} bytes)`;
+  },
+
+  async generate_music(args: { prompt: string; lyrics?: string }) {
+    if (!minimaxConfig) return "MiniMax API not configured";
+    const res = await fetch(`${minimaxConfig.baseUrl}/v1/music/generation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${minimaxConfig.apiKey}` },
+      body: JSON.stringify({ prompt: args.prompt, lyrics: args.lyrics || "" }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const data = await res.json();
+    if (!res.ok) return `Music generation failed (${res.status}): ${JSON.stringify(data)}`;
+    if (data.result?.audio_url) return `Music generated: ${data.result.audio_url}`;
+    if (data.task_id) return `Music task created: ${data.task_id}. Check back with task_id.`;
+    return JSON.stringify(data);
   },
 };
 
@@ -225,6 +283,53 @@ export function getToolList(): ToolDef[] {
             name: { type: "string", description: "Name of the skill (e.g. 'Write')" },
           },
           required: ["name"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_image",
+        description: "Generate an image from a text prompt using MiniMax AI. Returns image URL(s).",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Image description in detail" },
+            n: { type: "number", description: "Number of images (1-4)" },
+            aspect_ratio: { type: "string", description: "Aspect ratio: 1:1, 16:9, 4:3, 3:2, 2:3, 3:4, 9:16, 21:9" },
+          },
+          required: ["prompt"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "text_to_speech",
+        description: "Convert text to natural speech audio using MiniMax TTS. Saves mp3 file to data/outputs/.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "Text to convert to speech (max 10000 chars)" },
+            voice_id: { type: "string", description: "Voice ID. Default: female-shaonv" },
+            speed: { type: "number", description: "Speech speed (0.5-2.0)" },
+          },
+          required: ["text"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_music",
+        description: "Generate music from a prompt and optional lyrics using MiniMax AI. Returns URL or task ID.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Music style description (e.g. calm piano, upbeat pop)" },
+            lyrics: { type: "string", description: "Optional lyrics for the song" },
+          },
+          required: ["prompt"],
         },
       },
     },

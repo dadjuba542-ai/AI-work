@@ -24,6 +24,7 @@ export interface ToolDef {
 
 export interface LLMResponse {
   content: string | null;
+  think?: string | null;
   tool_calls?: Array<{
     id: string;
     type: "function";
@@ -48,23 +49,33 @@ function stripInternal(msg: LLMMessage): Record<string, any> {
   return { role: msg.role, content: msg.content };
 }
 
-async function llmFetch(
-  body: Record<string, any>,
-  apiKey: string,
-  baseUrl: string
-): Promise<Response> {
+async function llmFetchOpenAI(body: Record<string, any>, apiKey: string, baseUrl: string) {
   const url = `${baseUrl}/v1/chat/completions`;
   const bodyStr = JSON.stringify(body);
-  console.log(`[LLM] POST ${url} | model=${body.model} | messages=${body.messages?.length || 0} | tools=${body.tools?.length || 0} | ${bodyStr.slice(0, 500)}`);
+  console.log(`[LLM] POST ${url} | model=${body.model} | messages=${body.messages?.length || 0} | tools=${body.tools?.length || 0}`);
   return fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: bodyStr,
   });
 }
+
+function parseOpenAI(respText: string): LLMResponse {
+  const data = JSON.parse(respText);
+  const choice = data.choices?.[0];
+  if (!choice) throw new Error("No response choices");
+  const raw = choice.message?.content || null;
+  let think: string | null = null;
+  let content: string | null = null;
+  if (raw) {
+    const m = raw.match(/<think>([\s\S]*?)<\/think>/);
+    if (m) { think = m[1].trim(); content = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim(); }
+    else { content = raw; }
+  }
+  return { content, think, tool_calls: choice.message?.tool_calls };
+}
+
+// --- Main entry ---
 
 export async function callLLM(
   messages: LLMMessage[],
@@ -77,35 +88,13 @@ export async function callLLM(
   }
 ): Promise<LLMResponse> {
   const { apiKey, baseUrl, model, temperature, tools } = options;
+  const body: Record<string, any> = { model, messages: messages.map(stripInternal), temperature };
+  if (tools && tools.length > 0) { body.tools = tools; body.tool_choice = "auto"; }
 
-  const body: Record<string, any> = {
-    model,
-    messages: messages.map(stripInternal),
-    temperature,
-  };
-
-  if (tools && tools.length > 0) {
-    body.tools = tools;
-    body.tool_choice = "auto";
-  }
-
-  const response = await llmFetch(body, apiKey, baseUrl);
+  const response = await llmFetchOpenAI(body, apiKey, baseUrl);
   const respText = await response.text();
   console.log(`[LLM] Response ${response.status} | ${respText.slice(0, 300)}`);
 
-  if (!response.ok) {
-    throw new Error(`LLM API error (${response.status}): ${respText}`);
-  }
-
-  const data = JSON.parse(respText);
-  const choice = data.choices?.[0];
-  if (!choice) throw new Error("No response choices");
-
-  const content = choice.message?.content || null;
-  const cleaned = content ? content.replace(/<think>[\s\S]*?<\/think>/g, "").trim() : null;
-
-  return {
-    content: cleaned,
-    tool_calls: choice.message?.tool_calls,
-  };
+  if (!response.ok) throw new Error(`LLM API error (${response.status}): ${respText}`);
+  return parseOpenAI(respText);
 }

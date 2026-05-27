@@ -23,7 +23,7 @@ export function Navbar({ session }: { session: Session | null }) {
       <div className="container mx-auto flex h-14 items-center justify-between px-4">
         <Link href="/" className="flex items-center gap-2 font-semibold text-lg">
           <Bot className="h-5 w-5" />
-          Agent 终端
+          AI Work
         </Link>
 
         <DropdownMenu>

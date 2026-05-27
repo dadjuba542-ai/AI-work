@@ -12,6 +12,7 @@ export interface ToolCallEvent {
 
 export interface AgentResult {
   content: string;
+  think: string | null;
   toolCalls: ToolCallEvent[];
 }
 
@@ -35,6 +36,7 @@ export async function runAgent(
 
   const toolCalls: ToolCallEvent[] = [];
   let firstResponse = true;
+  let thinkAccum = "";
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     const response = await callLLM(messages, {
@@ -44,6 +46,8 @@ export async function runAgent(
       temperature,
       tools: enabledTools.length > 0 ? enabledTools : undefined,
     });
+
+    if (response.think) thinkAccum += (thinkAccum ? "\n" : "") + response.think;
 
     // Fallback: if first response has no tool calls and content is short,
     // hint about available skills/tools
@@ -129,12 +133,14 @@ export async function runAgent(
 
     return {
       content: response.content || "",
+      think: thinkAccum || null,
       toolCalls,
     };
   }
 
   return {
     content: messages[messages.length - 1]?.content || "(max iterations reached)",
+    think: thinkAccum || null,
     toolCalls,
   };
 }

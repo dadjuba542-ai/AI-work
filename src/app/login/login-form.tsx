@@ -44,19 +44,18 @@ export function LoginForm() {
     <div className="min-h-screen flex items-center justify-center bg-muted/50">
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
-          <CardTitle className="text-2xl">Agent 终端</CardTitle>
+          <CardTitle className="text-2xl">AI Work</CardTitle>
           <CardDescription>登录以使用 AI Agent 助手</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="email">邮箱</Label>
+              <Label htmlFor="email">账号</Label>
               <Input
                 id="email"
-                type="email"
-                placeholder="admin@agent.local"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                placeholder="输入账号"
                 required
               />
             </div>

@@ -52,6 +52,8 @@ export function AdminPanel() {
   const [users, setUsers] = useState<User[]>([]);
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("https://api.minimaxi.com");
+  const [visionKey, setVisionKey] = useState("");
+  const [visionModel, setVisionModel] = useState("mimo-v2.5");
   const [savingKey, setSavingKey] = useState(false);
 
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -90,6 +92,8 @@ export function AdminPanel() {
       setApiKey(data.llm_api_key || "");
       const raw = data.llm_base_url || "";
       setApiBase(raw.replace(/\/v1\/chat\/completions\/?$/, "").replace(/\/v1\/?$/, "") || "https://api.minimaxi.com");
+      setVisionKey(data.vision_api_key || "");
+      setVisionModel(data.vision_model || "mimo-v2.5");
     }
   }, []);
 
@@ -124,7 +128,7 @@ export function AdminPanel() {
     const res = await fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ llm_api_key: apiKey, llm_base_url: normalized }),
+      body: JSON.stringify({ llm_api_key: apiKey, llm_base_url: normalized, vision_api_key: visionKey, vision_model: visionModel }),
     });
     if (res.ok) {
       toast.success("API 配置已保存");
@@ -278,6 +282,42 @@ export function AdminPanel() {
               {savingKey ? "保存中..." : "保存"}
             </Button>
           </form>
+        </CardContent>
+      </Card>
+
+      <Card className="mb-8">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Eye className="h-4 w-4" />
+            识图 API（MIMO）
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={saveApiKey} className="flex gap-3 items-end flex-wrap">
+            <div className="space-y-1 flex-1 min-w-[200px]">
+              <Label htmlFor="vision-key">MIMO API Key</Label>
+              <Input
+                id="vision-key"
+                type="password"
+                value={visionKey}
+                onChange={(e) => setVisionKey(e.target.value)}
+                placeholder="mimo-..."
+              />
+            </div>
+            <div className="space-y-1 min-w-[140px]">
+              <Label htmlFor="vision-model">模型</Label>
+              <Input
+                id="vision-model"
+                value={visionModel}
+                onChange={(e) => setVisionModel(e.target.value)}
+                placeholder="gemini-2.0-flash-exp"
+              />
+            </div>
+            <Button type="submit" disabled={savingKey}>
+              {savingKey ? "保存中..." : "保存"}
+            </Button>
+          </form>
+          <p className="text-xs text-muted-foreground mt-2">仅用于识别图片内容，回答由 MiniMax 生成。免费额度 1500次/天。</p>
         </CardContent>
       </Card>
 
@@ -738,8 +778,8 @@ tools_allowed: ["read_file"]
               <DialogHeader><DialogTitle>新建用户</DialogTitle></DialogHeader>
               <form onSubmit={createUser} className="space-y-4">
                 <div className="space-y-2">
-                  <Label>邮箱</Label>
-                  <Input type="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} required />
+                  <Label>账号</Label>
+                  <Input value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} required />
                 </div>
                 <div className="space-y-2">
                   <Label>姓名</Label>

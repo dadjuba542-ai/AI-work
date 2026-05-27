@@ -11,7 +11,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Credentials({
       credentials: {
-        email: { label: "邮箱", type: "email" },
+        email: { label: "账号" },
         password: { label: "密码", type: "password" },
       },
       async authorize(credentials) {

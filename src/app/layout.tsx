@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Agent 终端",
+  title: "AI Work",
   description: "AI Agent 能力市场，发现并使用智能体助手",
 };
 

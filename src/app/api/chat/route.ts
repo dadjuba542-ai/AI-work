@@ -2,11 +2,20 @@ import { auth } from "@/auth";
 import { db } from "@/db";
 import { agents, conversations, messages, settings, apiProviders, skills, agentSkills } from "@/db/schema";
 import { eq, and, inArray } from "drizzle-orm";
-import { runAgent } from "@/lib/agent-runner";
-import { AgentResult } from "@/lib/agent-runner";
-import type { LLMMessage } from "@/lib/llm";
+import { callLLM, LLMMessage } from "@/lib/llm";
+import { getToolHandler, getToolList, setMiniMaxConfig } from "@/lib/tools";
+import type { ToolDef } from "@/lib/llm";
 import { join } from "path";
 import { readdirSync } from "fs";
+
+interface ToolCallEvent {
+  id: string;
+  name: string;
+  input: string;
+  output: string;
+  ok: boolean;
+  durationMs: number;
+}
 
 function extractTriggers(desc: string, name: string): string[] {
   const words = desc.split(/[\s,，。、；]+/).filter((w) => w.length > 1);
@@ -54,6 +63,8 @@ export async function POST(req: Request) {
     apiKey = keySetting.value;
     baseUrl = urlSetting?.value || "https://api.minimaxi.com";
   }
+
+  setMiniMaxConfig(apiKey, baseUrl);
 
   // Build user content: store placeholder text, attach images to LLM message
   const hasImages = files && Array.isArray(files) && files.some((f: any) => f.kind === "image");
@@ -180,7 +191,7 @@ export async function POST(req: Request) {
   if (files && Array.isArray(files) && files.length > 0) {
     const images = files.filter((f: any) => f.kind === "image" && f.data);
     const textFiles = files.filter((f: any) => f.kind === "text" && f.data);
-
+    
     if (images.length > 0) {
       userMsg.images = images.map((f: any) => ({ type: f.type || "image/png", data: f.data }));
     }
@@ -201,39 +212,156 @@ export async function POST(req: Request) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const emit = (data: any) => controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+      const toolCalls: ToolCallEvent[] = [];
+
+      // Pre-process images: use MIMO vision API (OpenAI-compatible, supports base64 images)
+      if (userMsg.images && userMsg.images.length > 0) {
+        try {
+          const [visionKeySetting] = db.select().from(settings).where(eq(settings.key, "vision_api_key")).all();
+          const [visionModelSetting] = db.select().from(settings).where(eq(settings.key, "vision_model")).all();
+          const visionKey = visionKeySetting?.value;
+
+          if (visionKey) {
+            const visionModel = visionModelSetting?.value || "mimo-v2.5";
+            const parts: any[] = [{ type: "text", text: userMsg.content || "Describe these images in detail in Chinese." }];
+            for (const img of userMsg.images) {
+              parts.push({ type: "image_url", image_url: { url: `data:${img.type};base64,${img.data}` } });
+            }
+            const visionRes = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "api-key": visionKey },
+              body: JSON.stringify({ model: visionModel, temperature: 0.3, messages: [{ role: "user", content: parts }] }),
+              signal: AbortSignal.timeout(60000),
+            });
+            if (visionRes.ok) {
+              const visionData = await visionRes.json();
+              const descText = visionData.choices?.[0]?.message?.content?.replace(/<think>[\s\S]*?<\/think>/g, "").trim() || "";
+              if (descText) {
+                userMsg.content = (userMsg.content || "") + `\n\n[图片描述]:\n${descText}`;
+              }
+            } else {
+              emit({ type: "text", content: `[识图失败] MIMO API ${visionRes.status}` });
+            }
+          } else {
+            emit({ type: "text", content: "[识图] 未配置识图 API Key，请在管理后台设置" });
+          }
+        } catch (err: any) {
+          emit({ type: "text", content: `[识图异常] ${err.message}` });
+        }
+        userMsg.images = undefined;
+      }
+      let fullResponse = "";
+
+      const allTools = [...getToolList()];
+      const enabledTools: ToolDef[] = toolNames
+        ? allTools.filter((t) => toolNames.includes(t.function.name))
+        : allTools;
+
       try {
-        const result = await runAgent(llmMessages, {
-          apiKey,
-          baseUrl,
-          model: agent.model,
-          temperature: parseFloat(agent.temperature),
-          maxIterations: agent.maxIterations,
-          toolNames,
-        });
+        for (let i = 0; i < (agent.maxIterations || 5); i++) {
+          const response = await callLLM(llmMessages, {
+            apiKey,
+            baseUrl,
+            model: agent.model,
+            temperature: parseFloat(agent.temperature),
+            tools: enabledTools.length > 0 ? enabledTools : undefined,
+          });
 
-        const toolExecsJson = JSON.stringify(result.toolCalls);
+          if (response.think) {
+            emit({ type: "think", content: response.think });
+          }
 
-        for (const tc of result.toolCalls) {
-          controller.enqueue(encoder.encode(JSON.stringify({ type: "tool", id: tc.id, name: tc.name, input: tc.input, output: tc.output, ok: tc.ok, durationMs: tc.durationMs }) + "\n"));
+          if (response.tool_calls && response.tool_calls.length > 0) {
+            llmMessages.push({
+              role: "assistant",
+              content: response.content,
+              tool_calls: response.tool_calls,
+            });
+
+            for (const tc of response.tool_calls) {
+              const start = Date.now();
+              let output: string;
+              let ok = true;
+
+              try {
+                const args = JSON.parse(tc.function.arguments);
+
+                if (tc.function.name === "load_skill") {
+                  const [skill] = db.select().from(skills).where(eq(skills.name, args.name)).all();
+                  if (skill) {
+                    const dirPath = join(process.cwd(), "data", "skills", skill.id);
+                    let files = "";
+                    try { files = readdirSync(dirPath).join(", "); } catch {}
+                    output = JSON.stringify({ loaded: true, name: skill.name, prompt: skill.systemPrompt, dir: `AGENT/data/skills/${skill.id}`, files });
+                    llmMessages.push({
+                      role: "user",
+                      content: `[System: Loaded Skill "${skill.name}"]\n\n${skill.systemPrompt}\n\nSkill directory: AGENT/data/skills/${skill.id}\nUse shell_exec with workdir="AGENT/data/skills/${skill.id}" to run scripts.\nUse read_file with path="AGENT/data/skills/${skill.id}/filename" to read docs.\n[/System]`,
+                    });
+                  } else {
+                    const all = db.select().from(skills).all();
+                    output = `Skill "${args.name}" not found. Available: ${all.map((s) => s.name).join(", ")}`;
+                    ok = false;
+                  }
+                } else {
+                  const handler = getToolHandler(tc.function.name);
+                  if (handler) {
+                    output = await handler(args);
+                  } else {
+                    output = `Unknown tool: ${tc.function.name}`;
+                    ok = false;
+                  }
+                }
+              } catch (err: any) {
+                output = err.message || String(err);
+                ok = false;
+              }
+
+              toolCalls.push({
+                id: tc.id,
+                name: tc.function.name,
+                input: tc.function.arguments,
+                output,
+                ok,
+                durationMs: Date.now() - start,
+              });
+
+              emit({ type: "tool", id: tc.id, name: tc.function.name, input: tc.function.arguments, output, ok, durationMs: Date.now() - start });
+
+              llmMessages.push({
+                role: "tool",
+                tool_call_id: tc.id,
+                name: tc.function.name,
+                content: output,
+              });
+            }
+            continue;
+          }
+
+          fullResponse = response.content || "";
+          emit({ type: "text", content: fullResponse });
+          emit({ type: "done" });
+
+          const toolExecsJson = JSON.stringify(toolCalls);
+          db.insert(messages).values({
+            id: crypto.randomUUID(),
+            conversationId,
+            role: "assistant",
+            content: fullResponse,
+            toolExecutions: toolExecsJson,
+            createdAt: new Date().toISOString(),
+          }).run();
+
+          controller.close();
+          return;
         }
 
-        const text = result.content || "";
-        controller.enqueue(encoder.encode(JSON.stringify({ type: "text", content: text }) + "\n"));
-        controller.enqueue(encoder.encode(JSON.stringify({ type: "done" }) + "\n"));
-
-        db.insert(messages).values({
-          id: crypto.randomUUID(),
-          conversationId,
-          role: "assistant",
-          content: text,
-          toolExecutions: toolExecsJson,
-          createdAt: new Date().toISOString(),
-        }).run();
-
+        emit({ type: "text", content: "(已达到最大迭代次数)" });
+        emit({ type: "done" });
         controller.close();
       } catch (err: any) {
-        controller.enqueue(encoder.encode(JSON.stringify({ type: "error", content: err.message }) + "\n"));
-        controller.enqueue(encoder.encode(JSON.stringify({ type: "done" }) + "\n"));
+        emit({ type: "error", content: err.message });
+        emit({ type: "done" });
         controller.close();
       }
     },

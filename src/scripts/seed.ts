@@ -3,7 +3,6 @@ import bcrypt from "bcryptjs";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
 import { execSync } from "child_process";
-import { join } from "path";
 import * as schema from "../db/schema";
 import { users, agents, settings, apiProviders } from "../db/schema";
 
@@ -20,19 +19,28 @@ async function seed() {
   const existingAdmin = db
     .select()
     .from(users)
-    .where(eq(users.email, "admin@agent.local"))
+    .where(eq(users.email, "admin"))
     .all();
 
   if (existingAdmin.length === 0) {
     db.insert(users).values({
-      id: adminId,
-      email: "admin@agent.local",
-      name: "管理员",
-      passwordHash: adminHash,
-      role: "admin",
-      createdAt: new Date().toISOString(),
+      id: adminId, email: "admin", name: "管理员",
+      passwordHash: adminHash, role: "admin", createdAt: new Date().toISOString(),
     }).run();
-    console.log("Created admin user: admin@agent.local / admin123");
+    console.log("Created admin user: admin / admin123");
+  }
+
+  // Sample regular users
+  const sampleHash = await bcrypt.hash("user123", 10);
+  for (const name of ["user1", "user2"]) {
+    const existing = db.select().from(users).where(eq(users.email, name)).all();
+    if (existing.length === 0) {
+      db.insert(users).values({
+        id: crypto.randomUUID(), email: name, name: `同事${name.slice(-1)}`,
+        passwordHash: sampleHash, role: "user", createdAt: new Date().toISOString(),
+      }).run();
+      console.log(`Created user: ${name} / user123`);
+    }
   }
 
   const existingProviders = db.select().from(apiProviders).all();
@@ -69,6 +77,14 @@ async function seed() {
       key: "llm_default_model",
       value: "MiniMax-M2.7",
     }).run();
+    db.insert(settings).values({
+      key: "vision_api_key",
+      value: "",
+    }).run();
+    db.insert(settings).values({
+      key: "vision_model",
+      value: "mimo-v2.5",
+    }).run();
     console.log("Created default settings");
   }
 
@@ -78,7 +94,7 @@ async function seed() {
     console.log("No agents found, importing from prompts collection...");
     try {
       const result = execSync("python3 src/scripts/import-prompts.py", {
-        cwd: join(__dirname, ".."),
+        cwd: process.cwd(),
         timeout: 120000,
         encoding: "utf-8",
       });
