@@ -1,6 +1,6 @@
 import { auth } from "@/auth";
 import { db } from "@/db";
-import { skills } from "@/db/schema";
+import { skills, userSkills } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 export async function GET() {
@@ -8,12 +8,22 @@ export async function GET() {
   if (!session) return Response.json({ error: "未登录" }, { status: 401 });
 
   const list = db.select().from(skills).all();
-  return Response.json(list);
+  const userId = (session.user as { id: string; role?: string }).id;
+
+  const myFavs = db.select().from(userSkills).where(eq(userSkills.userId, userId)).all();
+  const favSkillIds = new Set(myFavs.map((f) => f.skillId));
+
+  const result = list.map((s) => ({
+    ...s,
+    favorited: favSkillIds.has(s.id),
+  }));
+
+  return Response.json(result);
 }
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 
@@ -27,9 +37,10 @@ export async function POST(req: Request) {
     description: body.description,
     systemPrompt: body.systemPrompt,
     toolsAllowed: body.toolsAllowed || "[]",
+    displayName: body.displayName || null,
     icon: body.icon || "sparkles",
     category: body.category || "general",
-    createdBy: (session.user as any).id,
+    createdBy: (session.user as { id: string; role?: string }).id,
     createdAt: now,
     updatedAt: now,
   }).run();

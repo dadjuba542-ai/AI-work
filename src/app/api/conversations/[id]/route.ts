@@ -14,7 +14,7 @@ export async function DELETE(
   const [conv] = db
     .select()
     .from(conversations)
-    .where(and(eq(conversations.id, id), eq(conversations.userId, (session.user as any).id)))
+    .where(and(eq(conversations.id, id), eq(conversations.userId, (session.user as { id: string; role?: string }).id)))
     .all();
 
   if (!conv) return Response.json({ error: "对话不存在" }, { status: 404 });
@@ -37,7 +37,7 @@ export async function GET(
   const [conv] = db
     .select()
     .from(conversations)
-    .where(and(eq(conversations.id, id), eq(conversations.userId, (session.user as any).id)))
+    .where(and(eq(conversations.id, id), eq(conversations.userId, (session.user as { id: string; role?: string }).id)))
     .all();
 
   if (!conv) return Response.json({ error: "对话不存在" }, { status: 404 });

@@ -1,19 +1,24 @@
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { apiProviders } from "@/db/schema";
-import { eq } from "drizzle-orm";
 
 export async function GET() {
   const session = await auth();
   if (!session) return Response.json({ error: "未登录" }, { status: 401 });
 
   const list = db.select().from(apiProviders).all();
-  return Response.json(list.map(({ apiKey, ...rest }) => rest));
+  return Response.json(
+    list.map((provider) => {
+      const { apiKey, ...rest } = provider;
+      void apiKey;
+      return rest;
+    })
+  );
 }
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 

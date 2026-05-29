@@ -1,4 +1,4 @@
-import { callLLM, LLMMessage, ToolDef, LLMResponse } from "@/lib/llm";
+import { callLLM, LLMMessage, ToolDef } from "@/lib/llm";
 import { getToolHandler, getToolList } from "@/lib/tools";
 
 export interface ToolCallEvent {
@@ -54,9 +54,6 @@ export async function runAgent(
     if (firstResponse && toolNames && toolNames.includes("load_skill") &&
         (!response.tool_calls || response.tool_calls.length === 0) &&
         (response.content?.length || 0) < 200) {
-      const skillsHint = toolNames
-        .filter((t) => t !== "load_skill" && t !== "discover_skill_files")
-        .join(", ");
       messages.push({
         role: "user" as const,
         content: `[Hint] The user's request might match available skills. Consider checking with load_skill(). Available: ${toolNames.filter(t => t !== 'load_skill' && t !== 'discover_skill_files').join(", ")}`,
@@ -88,8 +85,8 @@ export async function runAgent(
             output = `Unknown tool: ${tc.function.name}`;
             ok = false;
           }
-        } catch (err: any) {
-          output = err.message || String(err);
+        } catch (err: unknown) {
+          output = err instanceof Error ? err.message : String(err);
           ok = false;
         }
 

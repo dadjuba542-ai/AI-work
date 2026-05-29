@@ -12,7 +12,7 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 
@@ -25,6 +25,7 @@ export async function PUT(
       description: body.description,
       systemPrompt: body.systemPrompt,
       toolsAllowed: body.toolsAllowed,
+      displayName: body.displayName || null,
       icon: body.icon,
       category: body.category,
       updatedAt: new Date().toISOString(),
@@ -40,7 +41,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 

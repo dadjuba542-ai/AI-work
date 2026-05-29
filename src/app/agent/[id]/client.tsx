@@ -9,15 +9,18 @@ import { ConversationList } from "@/components/conversation-list";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToolCard } from "@/components/tool-card";
 import { Badge } from "@/components/ui/badge";
-import { Bot, Sparkles } from "lucide-react";
+import { Bot, Sparkles, ChevronDown, ChevronRight, RotateCcw, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { safeJson } from "@/lib/fetch";
+import { uid } from "@/lib/utils";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   toolCalls?: ToolCallEvent[];
+  attachments?: Array<Pick<FileItem, "name" | "kind">>;
+  retryFiles?: FileItem[];
 }
 
 interface ToolCallEvent {
@@ -35,6 +38,15 @@ interface Conversation {
   updatedAt: string;
 }
 
+interface ConversationDetailResponse {
+  messages?: Array<{
+    id: string;
+    role: string;
+    content: string;
+    toolExecutions?: string | null;
+  }>;
+}
+
 interface Props {
   agentId: string;
   agentName: string;
@@ -44,6 +56,27 @@ interface Props {
   currentUserId: string;
   initialConversationId?: string;
   agentSkillNames: string[];
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-1 px-6 py-8">
+      <div className="flex items-center gap-1.5 bg-muted/60 rounded-2xl px-4 py-2.5">
+        <span
+          className="w-1.5 h-1.5 rounded-full bg-muted-foreground/50 animate-[typing-bounce_1.4s_infinite]"
+          style={{ animationDelay: "0ms" }}
+        />
+        <span
+          className="w-1.5 h-1.5 rounded-full bg-muted-foreground/50 animate-[typing-bounce_1.4s_infinite]"
+          style={{ animationDelay: "200ms" }}
+        />
+        <span
+          className="w-1.5 h-1.5 rounded-full bg-muted-foreground/50 animate-[typing-bounce_1.4s_infinite]"
+          style={{ animationDelay: "400ms" }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export function ChatPageClient({
@@ -58,14 +91,19 @@ export function ChatPageClient({
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
-  // 同步 URL 参数到 state，解决点对话记录不加载的问题
-  useEffect(() => { setConversationId(initialConversationId); }, [initialConversationId]);
+  useEffect(() => {
+    queueMicrotask(() => {
+      setConversationId(initialConversationId);
+    });
+  }, [initialConversationId]);
   const [streaming, setStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingTools, setStreamingTools] = useState<ToolCallEvent[]>([]);
   const [streamingThink, setStreamingThink] = useState("");
+  const [showThink, setShowThink] = useState(true);
   const [activeSkills, setActiveSkills] = useState<string[]>(agentSkillNames);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const batchInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -77,22 +115,16 @@ export function ChatPageClient({
 
   useEffect(() => { scrollToBottom(); }, [messages, streamingContent, streamingTools, streamingThink, scrollToBottom]);
 
-  useEffect(() => { fetchConversations(); }, [agentId]);
-
-  useEffect(() => {
-    if (conversationId) fetchMessages(conversationId);
-  }, [conversationId]);
-
-  async function fetchConversations() {
+  const fetchConversations = useCallback(async () => {
     const res = await fetch(`/api/conversations?agentId=${agentId}`);
-    if (res.ok) setConversations(await safeJson(res));
-  }
+    if (res.ok) setConversations(await safeJson<Conversation[]>(res));
+  }, [agentId]);
 
-  async function fetchMessages(convId: string) {
+  const fetchMessages = useCallback(async (convId: string) => {
     const res = await fetch(`/api/conversations/${convId}`);
     if (res.ok) {
-      const data = await safeJson(res);
-      const msgs: Message[] = (data.messages || []).map((m: any) => ({
+      const data = await safeJson<ConversationDetailResponse>(res);
+      const msgs: Message[] = (data.messages || []).map((m) => ({
         id: m.id,
         role: m.role === "user" ? "user" : "assistant",
         content: m.content || "",
@@ -100,7 +132,21 @@ export function ChatPageClient({
       }));
       setMessages(msgs);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      void fetchConversations();
+    });
+  }, [fetchConversations]);
+
+  useEffect(() => {
+    if (conversationId) {
+      queueMicrotask(() => {
+        void fetchMessages(conversationId);
+      });
+    }
+  }, [conversationId, fetchMessages]);
 
   async function createConversation(firstMessage: string): Promise<string> {
     const res = await fetch("/api/conversations", {
@@ -130,14 +176,20 @@ export function ChatPageClient({
       }
     }
 
-    const userMsg: Message = { id: crypto.randomUUID(), role: "user", content };
+    const userMsg: Message = {
+      id: uid(),
+      role: "user",
+      content,
+      attachments: (files || []).map((f) => ({ name: f.name, kind: f.kind })),
+      retryFiles: files,
+    };
     setMessages((prev) => [...prev, userMsg]);
     setStreaming(true);
     setStreamingContent("");
     setStreamingTools([]);
     setStreamingThink("");
+    setShowThink(true);
 
-    // Yield to React so progress bar renders before fetch blocks
     await new Promise((r) => setTimeout(r, 0));
 
     try {
@@ -172,8 +224,6 @@ export function ChatPageClient({
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            console.log("[stream]", event.type, (event.content || event.name || "").slice(0, 60));
-
             if (event.type === "tool") {
               tools.push(event);
               setStreamingTools([...tools]);
@@ -182,8 +232,6 @@ export function ChatPageClient({
             } else if (event.type === "text") {
               fullContent = event.content || "";
               setStreamingContent(fullContent);
-            } else if (event.type === "done") {
-              // handled after loop
             } else if (event.type === "error") {
               throw new Error(event.content);
             }
@@ -191,15 +239,22 @@ export function ChatPageClient({
         }
       }
 
+      const explain = buildFailureExplanation(tools);
+      const finalContent = explain ? `${fullContent}\n\n[失败原因解释]\n${explain}` : fullContent;
       setMessages((prev) => [
         ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: fullContent, toolCalls: tools },
+        { id: uid(), role: "assistant", content: finalContent, toolCalls: tools },
       ]);
       setStreamingContent("");
       setStreamingTools([]);
-      fetchConversations();
-    } catch (err: any) {
-      toast.error(`发送失败: ${err.message}`);
+      void fetchConversations();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "未知错误";
+      toast.error(`发送失败: ${message}`);
+      setMessages((prev) => [
+        ...prev,
+        { id: uid(), role: "assistant", content: `执行失败。\n\n[失败原因解释]\n${buildErrorExplanation(message)}` },
+      ]);
       setStreamingContent("");
       setStreamingTools([]);
     } finally {
@@ -222,7 +277,7 @@ export function ChatPageClient({
         setMessages([]);
         router.replace(`/agent/${agentId}`);
       }
-      fetchConversations();
+      void fetchConversations();
       toast.success("对话已删除");
     } else {
       toast.error("删除失败");
@@ -241,38 +296,113 @@ export function ChatPageClient({
     }
   }
 
+  function handleRetryByAssistantIndex(index: number) {
+    if (streaming) return;
+    const prev = messages[index - 1];
+    const curr = messages[index];
+    if (!curr || curr.role !== "assistant") return;
+    if (!prev || prev.role !== "user" || !prev.content?.trim()) {
+      toast.error("未找到可重试的用户消息");
+      return;
+    }
+    handleSend(prev.content, prev.retryFiles);
+  }
+
+  async function handleCopyByAssistantIndex(index: number) {
+    const curr = messages[index];
+    if (!curr || curr.role !== "assistant") return;
+    const text = (curr.content || "").trim();
+    if (!text) {
+      toast.error("没有可复制的内容");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("已复制");
+    } catch {
+      toast.error("复制失败");
+    }
+  }
+
+  function buildFailureExplanation(tools: ToolCallEvent[]): string {
+    const failed = tools.filter((t) => !t.ok);
+    if (failed.length === 0) return "";
+    const first = failed[0];
+    return `工具 ${first.name} 执行失败，可能是参数格式不正确、权限受限或外部服务超时。可先检查输入参数，再重试。原始错误：${(first.output || "").slice(0, 180)}`;
+  }
+
+  function buildErrorExplanation(message: string): string {
+    if (/401|403|无权限|未登录/i.test(message)) return "当前请求缺少权限，请先确认账号权限或重新登录后再试。";
+    if (/timeout|超时|No response/i.test(message)) return "请求超时或服务无响应，建议稍后重试，或缩短输入内容。";
+    if (/LLM API error|5\d\d/.test(message)) return "模型服务端返回异常，建议重试或切换模型。";
+    return `请求失败，可能是网络或工具调用异常。错误信息：${message.slice(0, 180)}`;
+  }
+
+  async function handleBatchFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const selected = Array.from(e.target.files || []) as File[];
+    if (selected.length === 0 || streaming) return;
+    const batchPrompt = window.prompt("输入批量处理指令（会对每个文件执行一次）", "请总结这个文件并给出关键结论");
+    if (!batchPrompt?.trim()) {
+      e.target.value = "";
+      return;
+    }
+    for (let i = 0; i < selected.length; i++) {
+      const f = selected[i];
+      const b64 = await new Promise<string>((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve((r.result as string).split(",")[1]);
+        r.readAsDataURL(f);
+      });
+      const ext = f.name.split(".").pop()?.toLowerCase() || "";
+      const isImage = f.type.startsWith("image/");
+      const isOffice = !isImage && ["xlsx", "xls", "docx", "pptx"].includes(ext);
+      const item: FileItem = {
+        name: f.name,
+        type: f.type || "application/octet-stream",
+        data: b64,
+        kind: isImage ? "image" : isOffice ? "office" : "text",
+      };
+      await handleSend(`${batchPrompt}\n\n[批量处理 ${i + 1}/${selected.length}] 文件：${f.name}`, [item]);
+    }
+    e.target.value = "";
+  }
+
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
       <ConversationList
         conversations={conversations}
         agentId={agentId}
+        agentName={agentName}
         currentId={conversationId}
         onNew={handleNewConversation}
         onDelete={deleteConversation}
       />
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="border-b px-4 py-3 flex items-center gap-3 shrink-0">
-          <Bot className="h-5 w-5 text-primary" />
-          <div className="flex-1">
-            <h2 className="font-semibold text-sm">{agentName}</h2>
-            <p className="text-xs text-muted-foreground">{agentDescription}</p>
+      <div className="flex-1 flex flex-col min-w-0 bg-background">
+        {/* Header */}
+        <div className="border-b px-5 py-2.5 flex items-center gap-3 shrink-0 bg-card/50 backdrop-blur-sm">
+          <div className="p-1.5 rounded-lg bg-primary/10">
+            <Bot className="h-4 w-4 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="font-semibold text-sm truncate">{agentName}</h2>
+            <p className="text-[11px] text-muted-foreground truncate">{agentDescription}</p>
           </div>
           {conversationId && (
-            <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={clearContext}>
+            <Button variant="ghost" size="sm" className="text-xs text-muted-foreground h-8" onClick={clearContext}>
               清空上下文
             </Button>
           )}
         </div>
 
         {agentSkillNames.length > 0 && (
-          <div className="border-b px-4 py-1.5 flex items-center gap-2 shrink-0 overflow-x-auto">
+          <div className="border-b px-5 py-2 flex items-center gap-2 shrink-0 overflow-x-auto">
             <Sparkles className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             {agentSkillNames.map((name) => (
               <Badge
                 key={name}
                 variant={activeSkills.includes(name) ? "default" : "outline"}
-                className="cursor-pointer text-xs"
+                className="cursor-pointer text-[11px] font-medium"
                 onClick={() => {
                   setActiveSkills((prev) =>
                     prev.includes(name)
@@ -287,26 +417,33 @@ export function ChatPageClient({
           </div>
         )}
 
-        <ScrollArea className="flex-1" ref={scrollRef}>
+        <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
           {messages.length === 0 && !streaming ? (
             <div className="flex items-center justify-center h-full py-24">
-              <div className="text-center">
-                <Bot className="h-12 w-12 text-muted-foreground/30 mx-auto mb-4" />
-                <p className="text-muted-foreground">选择一个 Agent 开始对话</p>
+              <div className="text-center max-w-md px-4">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 mb-5">
+                  <Sparkles className="h-8 w-8 text-primary/60" />
+                </div>
+                <h3 className="text-lg font-semibold mb-1">{agentName}</h3>
+                <p className="text-sm text-muted-foreground mb-6">{agentDescription}</p>
                 {examplePrompts.length > 0 && (
-                  <div className="flex flex-wrap gap-2 justify-center mt-4">
+                  <div className="flex flex-wrap justify-center gap-2">
                     {examplePrompts.map((prompt, i) => (
-                      <Badge key={i} variant="secondary" className="cursor-pointer hover:bg-secondary/80" onClick={() => handleSend(prompt)}>
+                      <button
+                        key={i}
+                        onClick={() => handleSend(prompt)}
+                        className="px-3.5 py-2 rounded-xl bg-card border border-border/70 text-sm text-foreground/80 hover:border-primary/30 hover:bg-primary/[0.03] hover:text-primary transition-all duration-200 shadow-sm"
+                      >
                         {prompt}
-                      </Badge>
+                      </button>
                     ))}
                   </div>
                 )}
               </div>
             </div>
           ) : (
-            <div>
-              {messages.map((msg) => (
+            <div className="pb-4">
+              {messages.map((msg, index) => (
                 <div key={msg.id}>
                   {msg.toolCalls && msg.toolCalls.length > 0 && (
                     <div className="px-4 py-2 bg-muted/30">
@@ -316,16 +453,41 @@ export function ChatPageClient({
                     </div>
                   )}
                   <ChatMessage role={msg.role} content={msg.content} />
+                  {msg.role === "user" && msg.attachments && msg.attachments.length > 0 && (
+                    <div className="px-6 -mt-1 mb-2 flex justify-end">
+                      <div className="rounded-md border border-border/60 bg-card/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+                        已上传：{msg.attachments.map((a) => a.name).join("、")}
+                      </div>
+                    </div>
+                  )}
+                  {msg.role === "assistant" && (
+                    <div className="px-6 pl-[4.6rem] -mt-1 mb-2 flex items-center gap-2">
+                      <button
+                        onClick={() => handleRetryByAssistantIndex(index)}
+                        disabled={streaming}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-card/60 px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card transition-colors disabled:opacity-50"
+                        title="重试上一条用户请求"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        重试
+                      </button>
+                      <button
+                        onClick={() => handleCopyByAssistantIndex(index)}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-card/60 px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+                        title="复制这条回复"
+                      >
+                        <Copy className="h-3 w-3" />
+                        复制
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
+
               {streaming && !streamingContent && !streamingThink && streamingTools.length === 0 && (
-                <div className="px-6 py-8">
-                  <div className="h-1 bg-muted rounded-full overflow-hidden">
-                    <div className="h-full w-1/3 bg-primary rounded-full animate-indeterminate" />
-                  </div>
-                  <p className="text-xs text-muted-foreground/60 text-center mt-2">正在思考...</p>
-                </div>
+                <TypingIndicator />
               )}
+
               {streamingTools.length > 0 && (
                 <div className="px-4 py-2 bg-muted/30">
                   {streamingTools.map((tc) => (
@@ -333,14 +495,24 @@ export function ChatPageClient({
                   ))}
                 </div>
               )}
+
               {streamingThink && (
-                <div className="px-4 py-3 border-b border-dashed border-muted-foreground/20">
-                  <p className="text-xs text-muted-foreground/60 mb-1">思考过程</p>
-                  <div className="text-sm text-muted-foreground/70 whitespace-pre-wrap italic">
-                    {streamingThink}
-                  </div>
+                <div className="px-4 sm:px-6 py-3 border-b border-dashed border-muted-foreground/15">
+                  <button
+                    onClick={() => setShowThink((v) => !v)}
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors mb-2"
+                  >
+                    {showThink ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    <span className="font-medium">思考过程</span>
+                  </button>
+                  {showThink && (
+                    <div className="text-sm text-muted-foreground/60 whitespace-pre-wrap italic leading-relaxed pl-4 border-l-2 border-muted-foreground/10">
+                      {streamingThink}
+                    </div>
+                  )}
                 </div>
               )}
+
               {streamingContent && <ChatMessage role="assistant" content={streamingContent} />}
             </div>
           )}
@@ -351,6 +523,23 @@ export function ChatPageClient({
           disabled={streaming}
           examplePrompts={messages.length === 0 ? examplePrompts : undefined}
         />
+        <div className="px-4 pb-3 -mt-2">
+          <input
+            ref={batchInputRef}
+            type="file"
+            multiple
+            accept="image/*,.txt,.md,.py,.ts,.js,.tsx,.json,.csv,.xlsx,.xls,.docx,.pptx"
+            className="hidden"
+            onChange={handleBatchFiles}
+          />
+          <button
+            onClick={() => batchInputRef.current?.click()}
+            disabled={streaming}
+            className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-4 disabled:opacity-50"
+          >
+            批量处理入口
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ export interface ParsedSkill {
   icon: string;
   toolsAllowed: string[];
   systemPrompt: string;
+  displayName?: string;
 }
 
 export function parseSkillMd(content: string): ParsedSkill | null {
@@ -14,15 +15,25 @@ export function parseSkillMd(content: string): ParsedSkill | null {
   const match = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!match) return null;
 
-  let front: Record<string, any>;
+  let front: Record<string, unknown>;
   try {
-    front = (yaml.load(match[1]) || {}) as Record<string, any>;
+    front = (yaml.load(match[1]) || {}) as Record<string, unknown>;
   } catch {
     return null;
   }
 
-  const name = front.name || front.name_cn || "";
-  const description = front.description || front.desc || "";
+  const name =
+    typeof front.name === "string"
+      ? front.name
+      : typeof front.name_cn === "string"
+        ? front.name_cn
+        : "";
+  const description =
+    typeof front.description === "string"
+      ? front.description
+      : typeof front.desc === "string"
+        ? front.desc
+        : "";
   if (!name || !description) return null;
 
   let tools: string[] = [];
@@ -32,12 +43,22 @@ export function parseSkillMd(content: string): ParsedSkill | null {
   const body = match[2].trim();
   if (!body) return null;
 
+  const category = typeof front.category === "string" ? front.category : "general";
+  const icon = typeof front.icon === "string" ? front.icon : "sparkles";
+  const displayName =
+    typeof front.name_cn === "string"
+      ? front.name_cn
+      : typeof front.display_name === "string"
+        ? front.display_name
+        : undefined;
+
   return {
     name,
     description: typeof description === "string" ? description : String(description),
-    category: front.category || "general",
-    icon: front.icon || "sparkles",
+    category,
+    icon,
     toolsAllowed: tools,
     systemPrompt: body,
+    displayName,
   };
 }

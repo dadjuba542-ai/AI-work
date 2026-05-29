@@ -15,7 +15,7 @@ export async function GET(req: Request) {
     .from(conversations)
     .where(
       and(
-        eq(conversations.userId, (session.user as any).id),
+        eq(conversations.userId, (session.user as { id: string; role?: string }).id),
         agentId ? eq(conversations.agentId, agentId) : undefined,
       )
     )
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
 
   db.insert(conversations).values({
     id,
-    userId: (session.user as any).id,
+    userId: (session.user as { id: string; role?: string }).id,
     agentId,
     title: title || "新对话",
     createdAt: now,

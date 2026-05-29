@@ -18,7 +18,7 @@ export interface ToolDef {
   function: {
     name: string;
     description: string;
-    parameters: Record<string, any>;
+    parameters: Record<string, unknown>;
   };
 }
 
@@ -32,7 +32,7 @@ export interface LLMResponse {
   }>;
 }
 
-function stripInternal(msg: LLMMessage): Record<string, any> {
+function stripInternal(msg: LLMMessage): Record<string, unknown> {
   if (msg.role === "tool") {
     return { role: "tool", tool_call_id: msg.tool_call_id, content: msg.content };
   }
@@ -40,7 +40,8 @@ function stripInternal(msg: LLMMessage): Record<string, any> {
     return { role: "assistant", content: msg.content, tool_calls: msg.tool_calls };
   }
   if (msg.images && msg.images.length > 0 && msg.role === "user") {
-    const parts: any[] = msg.content ? [{ type: "text", text: msg.content }] : [];
+    const parts: Array<{ type: "text"; text: string | null } | { type: "image_url"; image_url: { url: string } }> =
+      msg.content ? [{ type: "text", text: msg.content }] : [];
     for (const img of msg.images) {
       parts.push({ type: "image_url", image_url: { url: `data:${img.type};base64,${img.data}` } });
     }
@@ -49,10 +50,12 @@ function stripInternal(msg: LLMMessage): Record<string, any> {
   return { role: msg.role, content: msg.content };
 }
 
-async function llmFetchOpenAI(body: Record<string, any>, apiKey: string, baseUrl: string) {
+async function llmFetchOpenAI(body: Record<string, unknown>, apiKey: string, baseUrl: string) {
   const url = `${baseUrl}/v1/chat/completions`;
   const bodyStr = JSON.stringify(body);
-  console.log(`[LLM] POST ${url} | model=${body.model} | messages=${body.messages?.length || 0} | tools=${body.tools?.length || 0}`);
+  const msgCount = Array.isArray(body.messages) ? body.messages.length : 0;
+  const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
+  console.log(`[LLM] POST ${url} | model=${String(body.model || "")} | messages=${msgCount} | tools=${toolCount}`);
   return fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -61,7 +64,9 @@ async function llmFetchOpenAI(body: Record<string, any>, apiKey: string, baseUrl
 }
 
 function parseOpenAI(respText: string): LLMResponse {
-  const data = JSON.parse(respText);
+  const data = JSON.parse(respText) as {
+    choices?: Array<{ message?: { content?: string | null; tool_calls?: LLMResponse["tool_calls"] } }>;
+  };
   const choice = data.choices?.[0];
   if (!choice) throw new Error("No response choices");
   const raw = choice.message?.content || null;
@@ -88,7 +93,7 @@ export async function callLLM(
   }
 ): Promise<LLMResponse> {
   const { apiKey, baseUrl, model, temperature, tools } = options;
-  const body: Record<string, any> = { model, messages: messages.map(stripInternal), temperature };
+  const body: Record<string, unknown> = { model, messages: messages.map(stripInternal), temperature };
   if (tools && tools.length > 0) { body.tools = tools; body.tool_choice = "auto"; }
 
   const response = await llmFetchOpenAI(body, apiKey, baseUrl);

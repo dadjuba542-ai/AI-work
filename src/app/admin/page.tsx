@@ -4,7 +4,8 @@ import { AdminPanel } from "./admin-panel";
 
 export default async function AdminPage() {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") redirect("/");
+  const role = (session?.user as { role?: string } | undefined)?.role;
+  if (!session || role !== "admin") redirect("/");
 
   return <AdminPanel />;
 }

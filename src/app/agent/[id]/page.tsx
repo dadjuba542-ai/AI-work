@@ -55,7 +55,7 @@ export default async function AgentChatPage({
       agentDescription={agent.description}
       agentIcon={agent.icon}
       examplePrompts={examplePrompts}
-      currentUserId={(session.user as any).id}
+      currentUserId={(session.user as { id?: string }).id || ""}
       initialConversationId={convId}
       agentSkillNames={agentSkillNames}
     />

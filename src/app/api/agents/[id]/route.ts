@@ -22,29 +22,40 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session) return Response.json({ error: "未登录" }, { status: 401 });
+
+  const { id } = await params;
+  const [agent] = db.select().from(agents).where(eq(agents.id, id)).all();
+  if (!agent) return Response.json({ error: "Agent 不存在" }, { status: 404 });
+
+  const userId = (session.user as { id: string; role?: string }).id;
+  const role = (session.user as { id: string; role?: string }).role;
+  if (role !== "admin" && agent.createdBy !== userId) {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 
-  const { id } = await params;
   const body = await req.json();
 
-  db.update(agents)
-    .set({
-      name: body.name,
-      description: body.description,
-      icon: body.icon,
-      category: body.category,
-      systemPrompt: body.systemPrompt,
-      examplePrompts: body.examplePrompts,
-      model: body.model,
-      temperature: body.temperature,
-      isPublished: body.isPublished,
-      providerId: body.providerId || null,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(agents.id, id))
-    .run();
+  const updates: Record<string, unknown> = {
+    name: body.name,
+    description: body.description,
+    icon: body.icon,
+    category: body.category,
+    systemPrompt: body.systemPrompt,
+    examplePrompts: JSON.stringify(body.examplePrompts || []),
+    model: body.model,
+    temperature: body.temperature,
+    maxIterations: body.maxIterations,
+    isPublished: body.isPublished,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (role === "admin") {
+    updates.providerId = body.providerId || null;
+    updates.reviewStatus = body.reviewStatus;
+  }
+
+  db.update(agents).set(updates).where(eq(agents.id, id)).run();
 
   return Response.json({ ok: true });
 }
@@ -54,11 +65,18 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session) return Response.json({ error: "未登录" }, { status: 401 });
+
+  const { id } = await params;
+  const [agent] = db.select().from(agents).where(eq(agents.id, id)).all();
+  if (!agent) return Response.json({ error: "Agent 不存在" }, { status: 404 });
+
+  const userId = (session.user as { id: string; role?: string }).id;
+  const role = (session.user as { id: string; role?: string }).role;
+  if (role !== "admin" && agent.createdBy !== userId) {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 
-  const { id } = await params;
   db.delete(agents).where(eq(agents.id, id)).run();
 
   return Response.json({ ok: true });

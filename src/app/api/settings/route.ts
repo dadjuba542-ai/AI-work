@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 
 export async function GET() {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 
@@ -19,7 +19,7 @@ export async function GET() {
 
 export async function PUT(req: Request) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 

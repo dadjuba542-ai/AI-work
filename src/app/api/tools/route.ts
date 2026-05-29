@@ -1,7 +1,6 @@
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { tools } from "@/db/schema";
-import { eq } from "drizzle-orm";
 
 export async function GET() {
   const session = await auth();
@@ -13,7 +12,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session || (session.user as any).role !== "admin") {
+  if (!session || (session.user as { id: string; role?: string }).role !== "admin") {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
 

@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { cn } from "@/lib/utils";
-import { CheckCircle2, XCircle, ChevronDown, ChevronRight, Terminal, FileCode, Globe, Search, Loader2 } from "lucide-react";
+import { CheckCircle2, XCircle, ChevronDown, ChevronRight, Terminal, FileCode, Globe, Search, LucideIcon } from "lucide-react";
 
-const iconMap: Record<string, any> = {
+const iconMap: Record<string, LucideIcon> = {
   read_file: FileCode,
   write_file: FileCode,
   shell_exec: Terminal,
@@ -55,6 +54,22 @@ export function ToolCard({
           {output}
         </div>
       )}
+      {name === "generate_document" && ok && <DownloadLink output={output} />}
     </div>
+  );
+}
+
+function DownloadLink({ output }: { output: string }) {
+  let data: { url?: string; filename?: string } = {};
+  try { data = JSON.parse(output); } catch {}
+  if (!data.url) return null;
+  return (
+    <a
+      href={data.url}
+      download={data.filename}
+      className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-primary hover:underline px-2.5 py-1 rounded-md border border-primary/20 bg-primary/5"
+    >
+      📄 下载 {data.filename}
+    </a>
   );
 }

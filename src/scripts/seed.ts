@@ -99,8 +99,9 @@ async function seed() {
         encoding: "utf-8",
       });
       console.log(result);
-    } catch (err: any) {
-      console.error("Failed to import agents:", err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("Failed to import agents:", message);
     }
   }
 
@@ -109,4 +110,3 @@ async function seed() {
 }
 
 seed().catch(console.error);
-

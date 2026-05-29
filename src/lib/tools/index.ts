@@ -1,14 +1,23 @@
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync } from "fs";
-import { join, resolve } from "path";
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync, rmSync } from "fs";
+import { join, resolve, sep } from "path";
+import { lookup } from "dns/promises";
+import { isIP } from "net";
 import type { ToolDef } from "@/lib/llm";
 import { db } from "@/db";
 import { skills } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { buildSkillPromptBundle } from "@/lib/skill-runtime";
+import { generateDocument } from "./generate-document";
 
-const ROOT = resolve(join(process.cwd(), "../../"));
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ToolHandler = (args: any, ctx?: { userId?: string; role?: string }) => Promise<string>;
+
+const ROOT = process.cwd();
 const TIMEOUT = 30000;
 const MAX_FILE_SIZE = 1024 * 1024;
+const MAX_WEB_TEXT = 20000;
+const ROOT_PREFIX = ROOT.endsWith(sep) ? ROOT : ROOT + sep;
 
 let minimaxConfig: { apiKey: string; baseUrl: string } | null = null;
 
@@ -18,13 +27,92 @@ export function setMiniMaxConfig(apiKey: string, baseUrl: string) {
 
 function safePath(input: string): string {
   const resolved = resolve(join(ROOT, input));
-  if (!resolved.startsWith(ROOT)) {
+  if (!(resolved === ROOT || resolved.startsWith(ROOT_PREFIX))) {
     throw new Error(`Path outside workspace: ${input}`);
   }
   return resolved;
 }
 
-const toolHandlers: Record<string, (args: any) => Promise<string>> = {
+function isPrivateIpv4(ip: string): boolean {
+  const parts = ip.split(".").map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true;
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+function isPrivateIpv6(ip: string): boolean {
+  const v = ip.toLowerCase();
+  return v === "::1" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80:");
+}
+
+async function assertSafeFetchUrl(rawUrl: string): Promise<string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only http/https URLs are allowed");
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost") throw new Error("Blocked host");
+
+  const ipType = isIP(host);
+  if (ipType === 4 && isPrivateIpv4(host)) throw new Error("Blocked private IP");
+  if (ipType === 6 && isPrivateIpv6(host)) throw new Error("Blocked private IP");
+
+  if (ipType === 0) {
+    const addrs = await lookup(host, { all: true });
+    for (const a of addrs) {
+      if ((a.family === 4 && isPrivateIpv4(a.address)) || (a.family === 6 && isPrivateIpv6(a.address))) {
+        throw new Error("Blocked host (resolves to private IP)");
+      }
+    }
+  }
+
+  return parsed.toString();
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function htmlToPlainText(html: string): string {
+  const noScripts = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
+
+  const title = noScripts.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || "";
+  const body = noScripts
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  const compact = decodeHtmlEntities(body)
+    .replace(/\r/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  const clipped = compact.slice(0, MAX_WEB_TEXT);
+  return title ? `Title: ${decodeHtmlEntities(title)}\n\n${clipped}` : clipped;
+}
+
+const toolHandlers: Record<string, ToolHandler> = {
   async read_file(args: { path: string }) {
     const fp = safePath(args.path);
     if (!existsSync(fp)) throw new Error(`File not found: ${args.path}`);
@@ -40,21 +128,47 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
     return `Written ${args.content.length} bytes to ${args.path}`;
   },
 
-  async shell_exec(args: { command: string; workdir?: string }) {
-    const cwd = args.workdir ? safePath(args.workdir) : ROOT;
-    const result = execSync(args.command, {
-      cwd,
-      timeout: TIMEOUT,
-      maxBuffer: MAX_FILE_SIZE,
-      encoding: "utf-8",
-    });
-    return result.slice(0, MAX_FILE_SIZE) || "(no output)";
+  async shell_exec(args: { command: string; workdir?: string }, ctx) {
+    if (ctx?.role !== "admin") {
+      return "Error: shell_exec is restricted to admin users";
+    }
+    const BLOCKED_PATTERNS = [
+      /^(sudo|su|chmod|chown|dd|mkfs|mount|umount)\b/,
+      /\brm\s+-rf\b/,
+      /\b(ntttcp|wrk|siege|boom|stress)\b/i,
+      /\b(curl|wget|nc|ncat|telnet|ssh|scp|rsync|ftp|sftp)\b/i,
+    ];
+    const cmd = args.command.trim();
+    if (cmd.length > 5000) return "Error: Command too long (max 5000 chars)";
+    if (/[|;&`]/.test(cmd) || /\$\(/.test(cmd) || />|</.test(cmd)) {
+      return "Error: Command contains blocked shell operators";
+    }
+    for (const pattern of BLOCKED_PATTERNS) {
+      if (pattern.test(cmd)) return `Error: Command blocked by security policy: ${pattern}`;
+    }
+    const tmpDir = join(process.cwd(), "data", "tmp", "shell", crypto.randomUUID());
+    mkdirSync(tmpDir, { recursive: true });
+    const cwd = args.workdir ? safePath(args.workdir) : tmpDir;
+    try {
+      const result = execSync(cmd, {
+        cwd,
+        timeout: TIMEOUT,
+        maxBuffer: MAX_FILE_SIZE,
+        encoding: "utf-8",
+      });
+      return (result as string).slice(0, MAX_FILE_SIZE) || "(no output)";
+    } finally {
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
   },
 
   async web_fetch(args: { url: string }) {
-    const res = await fetch(args.url, { signal: AbortSignal.timeout(TIMEOUT) });
-    const text = await res.text();
-    return text.slice(0, MAX_FILE_SIZE);
+    const url = await assertSafeFetchUrl(args.url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT) });
+    const html = await res.text();
+    const text = htmlToPlainText(html);
+    const statusLine = `Fetched: ${url}\nStatus: ${res.status}\n`;
+    return `${statusLine}\n${text || "(empty page text)"}`.slice(0, MAX_FILE_SIZE);
   },
 
   async web_search(args: { query: string }) {
@@ -81,15 +195,14 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
       return `Skill "${args.name}" not found. Available: ${names}`;
     }
 
-    const dirPath = resolve(join(process.cwd(), "data", "skills", skill.id));
-    const tree = buildFileTree(dirPath);
+    const bundle = buildSkillPromptBundle(skill.id, skill.systemPrompt);
 
     return JSON.stringify({
       loaded: true,
       name: skill.name,
-      prompt: skill.systemPrompt,
+      prompt: bundle.prompt,
       dir: `AGENT/data/skills/${skill.id}`,
-      files: tree,
+      files: bundle.filesTree,
     });
   },
 
@@ -116,7 +229,7 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
     });
     const data = await res.json();
     if (!res.ok) return `Image generation failed (${res.status}): ${JSON.stringify(data)}`;
-    const urls = (data.data || []).map((d: any) => d.url).join("\n");
+    const urls = ((data.data || []) as Array<{ url?: string }>).map((d) => d.url || "").filter(Boolean).join("\n");
     return urls || JSON.stringify(data);
   },
 
@@ -157,6 +270,10 @@ const toolHandlers: Record<string, (args: any) => Promise<string>> = {
     if (data.task_id) return `Music task created: ${data.task_id}. Check back with task_id.`;
     return JSON.stringify(data);
   },
+
+  async generate_document(args: { format: string; filename: string; content: string }, ctx) {
+    return generateDocument(args, ctx?.userId);
+  },
 };
 
 function buildFileTree(dirPath: string): string {
@@ -180,7 +297,7 @@ function buildFileTree(dirPath: string): string {
   }
 }
 
-export function getToolHandler(name: string): ((args: any) => Promise<string>) | undefined {
+export function getToolHandler(name: string): ToolHandler | undefined {
   return toolHandlers[name];
 }
 
@@ -330,6 +447,22 @@ export function getToolList(): ToolDef[] {
             lyrics: { type: "string", description: "Optional lyrics for the song" },
           },
           required: ["prompt"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_document",
+        description: "生成可下载的办公文档（docx/ xlsx/ md）并返回下载链接。当用户要求生成文档、导出报告、保存分析结果时使用。content 使用 Markdown 格式描述内容。",
+        parameters: {
+          type: "object",
+          properties: {
+            format: { type: "string", enum: ["docx", "xlsx", "pptx", "md"], description: "文档格式" },
+            filename: { type: "string", description: "文件名（不含扩展名）" },
+            content: { type: "string", description: "文档内容（Markdown 格式）" },
+          },
+          required: ["format", "filename", "content"],
         },
       },
     },
